@@ -2,6 +2,7 @@ package golaunch
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"log"
@@ -76,6 +77,7 @@ type Launch interface {
 // communicate.
 func NewLaunch() Launch {
 	l := &launch{
+		mutex:          new(sync.Mutex),
 		cmdDiscovered:  make(chan bool, 1),
 		modeDiscovered: make(chan bool, 1),
 		stopWriting:    make(chan bool, 1),
@@ -87,7 +89,8 @@ func NewLaunch() Launch {
 
 // launch is the structure used to manage the connection to a Launch.
 type launch struct {
-	p gatt.Peripheral
+	mutex *sync.Mutex
+	p     gatt.Peripheral
 
 	cmdDiscovered  chan bool
 	cmd            *gatt.Characteristic
@@ -105,8 +108,10 @@ type launch struct {
 // a Launch.
 func (l *launch) Connect() error {
 	// Open Bluetooth device
+	l.mutex.Lock()
 	d, err := gatt.NewDevice(DefaultClientOptions...)
 	if err != nil {
+		l.mutex.Unlock()
 		return err
 	}
 
@@ -134,6 +139,7 @@ func (l *launch) Connect() error {
 
 	select {
 	case <-setupComplete:
+		l.mutex.Unlock()
 		// Give the Launch a little bit of time to get ready
 		<-time.After(readyTime)
 
@@ -148,6 +154,7 @@ func (l *launch) Connect() error {
 
 		return nil
 	case <-time.After(connectionTimeout):
+		l.mutex.Unlock()
 		return ErrConnectionTimeout
 	}
 }
@@ -168,7 +175,9 @@ func (l *launch) writeMode(c byte) error {
 	errChan := make(chan error, 1)
 	go func() {
 		if c == modeReadValuesAsBytes {
+			l.mutex.Lock()
 			err := l.p.WriteCharacteristic(l.mode, []byte{c}, false)
+			l.mutex.Unlock()
 			errChan <- err
 		}
 		errChan <- nil
@@ -193,7 +202,9 @@ func (l *launch) writeFromBuffer() {
 		case b := <-l.wbuffer:
 			// Limit amount of writes to avoid disconnects
 			<-l.limiter
+			l.mutex.Lock()
 			l.p.WriteCharacteristic(l.cmd, b[:], true)
+			l.mutex.Unlock()
 		}
 	}
 }
