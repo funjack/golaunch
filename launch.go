@@ -30,6 +30,8 @@ var (
 	// ErrWriteTimeout is the error returned when a write with response did
 	// not complete in time.
 	ErrWriteTimeout = errors.New("write timeout")
+	// ErrDisconnected is the error returned when ther is no connection.
+	ErrDisconnected = errors.New("disconnected")
 	// ErrInit is the error returned when there was an issue initializing
 	// the Launch.
 	ErrInit = errors.New("initialization error")
@@ -89,8 +91,9 @@ func NewLaunch() Launch {
 
 // launch is the structure used to manage the connection to a Launch.
 type launch struct {
-	mutex *sync.Mutex
-	p     gatt.Peripheral
+	connected bool
+	mutex     *sync.Mutex
+	p         gatt.Peripheral
 
 	cmdDiscovered  chan bool
 	cmd            *gatt.Characteristic
@@ -107,17 +110,20 @@ type launch struct {
 // Connect initializes configured Bluetooth device and creates a connection to
 // a Launch.
 func (l *launch) Connect() error {
-	// Open Bluetooth device
+	if l.connected {
+		return nil
+	}
 	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	// Open Bluetooth device
 	d, err := gatt.NewDevice(DefaultClientOptions...)
 	if err != nil {
-		l.mutex.Unlock()
 		return err
 	}
 
 	setupComplete := make(chan bool, 1)
 	go func() {
-
 		// Register Bluetooth event handlers
 		d.Handle(
 			gatt.PeripheralDiscovered(l.onPeripheralDiscovered),
@@ -139,7 +145,8 @@ func (l *launch) Connect() error {
 
 	select {
 	case <-setupComplete:
-		l.mutex.Unlock()
+		l.connected = true
+
 		// Give the Launch a little bit of time to get ready
 		<-time.After(readyTime)
 
@@ -154,14 +161,13 @@ func (l *launch) Connect() error {
 
 		return nil
 	case <-time.After(connectionTimeout):
-		l.mutex.Unlock()
 		return ErrConnectionTimeout
 	}
 }
 
 // Disconnect cancels the connection with the Launch.
 func (l *launch) Disconnect() {
-	if l.p != nil {
+	if l.connected {
 		if d := l.p.Device(); d != nil {
 			d.CancelConnection(l.p)
 		}
@@ -172,22 +178,14 @@ func (l *launch) Disconnect() {
 // the Launch in "read values as bytes", so it interprets values on the command
 // channel as bytes instead of binary coded decimals.
 func (l *launch) writeMode(c byte) error {
-	errChan := make(chan error, 1)
-	go func() {
-		if c == modeReadValuesAsBytes {
-			l.mutex.Lock()
-			err := l.p.WriteCharacteristic(l.mode, []byte{c}, false)
-			l.mutex.Unlock()
-			errChan <- err
-		}
-		errChan <- nil
-	}()
-	select {
-	case err := <-errChan:
-		return err
-	case <-time.After(connectionTimeout):
-		return ErrWriteTimeout
+	if !l.connected {
+		return ErrDisconnected
 	}
+	if c == modeReadValuesAsBytes {
+		err := l.p.WriteCharacteristic(l.mode, []byte{c}, false)
+		return err
+	}
+	return ErrUnknownMode
 }
 
 // writeFromBuffer sends commands to the Launch that are stored in the write
@@ -202,9 +200,7 @@ func (l *launch) writeFromBuffer() {
 		case b := <-l.wbuffer:
 			// Limit amount of writes to avoid disconnects
 			<-l.limiter
-			l.mutex.Lock()
 			l.p.WriteCharacteristic(l.cmd, b[:], true)
-			l.mutex.Unlock()
 		}
 	}
 }
@@ -295,7 +291,7 @@ func (l *launch) onDisconnected(p gatt.Peripheral, err error) {
 	}
 
 	p.Device().Stop()
-	<-time.After(time.Second * 2)
+	l.connected = false
 
 	if l.disconnectFunc != nil {
 		l.disconnectFunc()
