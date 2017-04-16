@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -22,11 +23,15 @@ var (
 func main() {
 	flag.Parse()
 
+	launchContext := context.Background()
+
 	l := golaunch.NewLaunch()
 	l.HandleDisconnect(func() {
 		os.Exit(0)
 	})
-	err := l.Connect()
+	ctx, cancel := context.WithTimeout(launchContext, time.Second*30)
+	err := l.Connect(ctx)
+	cancel()
 	if err != nil {
 		log.Fatal(err)
 	}

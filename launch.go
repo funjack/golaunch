@@ -1,37 +1,33 @@
 package golaunch
 
 import (
+	"context"
 	"errors"
-	"sync"
+	"strings"
 	"time"
 
-	"log"
-
-	"github.com/currantlabs/gatt"
+	"github.com/currantlabs/ble"
 )
 
 var (
 	// Bluetooth device name of the Launch
-	pName = "Launch"
+	name = "Launch"
 	// The main service UUID for the Launch
-	serviceID = gatt.MustParseUUID("88f80580-0000-01e6-aace-0002a5d5c51b")
+	serviceID = ble.MustParse("88f80580-0000-01e6-aace-0002a5d5c51b")
 	// Command characteristic (Write)
-	cmdCharID = gatt.MustParseUUID("88f80581-0000-01e6-aace-0002a5d5c51b")
+	cmdCharID = ble.MustParse("88f80581-0000-01e6-aace-0002a5d5c51b")
 	// Touch events characteristic (Notifications)
-	touchCharID = gatt.MustParseUUID("88f80582-0000-01e6-aace-0002a5d5c51b")
+	touchCharID = ble.MustParse("88f80582-0000-01e6-aace-0002a5d5c51b")
 	// Mode? characteristic (Read/Write)
-	modeCharID = gatt.MustParseUUID("88f80583-0000-01e6-aace-0002a5d5c51b")
+	modeCharID = ble.MustParse("88f80583-0000-01e6-aace-0002a5d5c51b")
 )
 
 var (
-	// ErrConnectionTimeout is the error returned when a connection could
-	// not be made in time.
-	ErrConnectionTimeout = errors.New("connection timeout")
-	// ErrWriteTimeout is the error returned when a write with response did
-	// not complete in time.
-	ErrWriteTimeout = errors.New("write timeout")
-	// ErrDisconnected is the error returned when ther is no connection.
+	// ErrDisconnected is the error returned when there is no connection.
 	ErrDisconnected = errors.New("disconnected")
+	// ErrDiscover is the error returned when there was an issue
+	// discovering the Launch.
+	ErrDiscover = errors.New("could not discover launch")
 	// ErrInit is the error returned when there was an issue initializing
 	// the Launch.
 	ErrInit = errors.New("initialization error")
@@ -43,10 +39,6 @@ var (
 var (
 	// Time for the device to get ready before sending data.
 	readyTime = time.Second * 2
-	// Connection timeout.
-	connectionTimeout = time.Second * 10
-	// Write timeout on with response writes.
-	writeTimeout = time.Second * 1
 	// Minimum amount of time between write operations.
 	threshold = time.Millisecond * 100
 	// Amount of write events to buffer before blocking.
@@ -63,7 +55,7 @@ const (
 // Launch interface represents a device that can move like a Launch.
 type Launch interface {
 	// Connect will (re)connect to the Launch.
-	Connect() error
+	Connect(ctx context.Context) error
 
 	// Disconnect will disconnect to the Launch.
 	Disconnect()
@@ -79,98 +71,159 @@ type Launch interface {
 // communicate.
 func NewLaunch() Launch {
 	l := &launch{
-		mutex:          new(sync.Mutex),
-		cmdDiscovered:  make(chan bool, 1),
-		modeDiscovered: make(chan bool, 1),
-		stopWriting:    make(chan bool, 1),
-		wbuffer:        make(chan [2]byte, writeBufferSize),
-		limiter:        time.Tick(threshold),
+		disconnect: make(chan bool),
+		wbuffer:    make(chan [2]byte, writeBufferSize),
+		limiter:    time.Tick(threshold),
 	}
 	return l
 }
 
+// NewLaunchWithDevice creates and returns a Launch client that can be used to
+// communicate over specified Bluetooth device.
+func NewLaunchWithDevice(d ble.Device) Launch {
+	l, _ := NewLaunch().(*launch)
+	l.device = d
+	ble.SetDefaultDevice(d)
+	return l
+
+}
+
 // launch is the structure used to manage the connection to a Launch.
 type launch struct {
-	connected bool
-	mutex     *sync.Mutex
-	p         gatt.Peripheral
+	device ble.Device
+	client ble.Client
 
-	cmdDiscovered  chan bool
-	cmd            *gatt.Characteristic
-	modeDiscovered chan bool
-	mode           *gatt.Characteristic
+	cmd  *ble.Characteristic
+	mode *ble.Characteristic
 
-	stopWriting chan bool
-	wbuffer     chan [2]byte
-	limiter     <-chan time.Time
+	disconnect chan bool
+	wbuffer    chan [2]byte
+	limiter    <-chan time.Time
 
 	disconnectFunc func()
 }
 
 // Connect initializes configured Bluetooth device and creates a connection to
 // a Launch.
-func (l *launch) Connect() error {
-	if l.connected {
+func (l *launch) Connect(ctx context.Context) (err error) {
+	// Claim a Bluetooth device
+	if l.device == nil {
+		l.device, err = NewDefaultDevice()
+		if err != nil {
+			return err
+		}
+		ble.SetDefaultDevice(l.device)
+	}
+
+	// Still connected
+	if l.client != nil {
 		return nil
 	}
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
 
-	// Open Bluetooth device
-	d, err := gatt.NewDevice(DefaultClientOptions...)
+	// Discover the Launch and it's characteristics
+	err = l.discover(ctx)
 	if err != nil {
 		return err
 	}
 
-	setupComplete := make(chan bool, 1)
+	// Give the Launch a little bit of time to get ready
+	<-time.After(readyTime)
+
+	// Put the Launch into a mode that it will actually work well
+	err = l.writeMode(modeReadValuesAsBytes)
+	if err != nil {
+		l.client.CancelConnection()
+		l.cleanupClient()
+		return ErrInit
+	}
+
+	// Handle disconnects
+	stopWriting := make(chan bool)
 	go func() {
-		// Register Bluetooth event handlers
-		d.Handle(
-			gatt.PeripheralDiscovered(l.onPeripheralDiscovered),
-			gatt.PeripheralConnected(l.onConnected),
-			gatt.PeripheralDisconnected(l.onDisconnected),
-		)
-		// Start
-		d.Init(onStateChanged)
-
-		// Make sure all characteristics are discovered before starting
-		for i := 0; i < 2; i++ {
-			select {
-			case <-l.cmdDiscovered:
-			case <-l.modeDiscovered:
-			}
+		select {
+		case <-l.client.Disconnected():
+		case <-l.disconnect:
+			l.client.CancelConnection()
 		}
-		setupComplete <- true
+		stopWriting <- true
+		l.cleanupClient()
+
+		if l.disconnectFunc != nil {
+			l.disconnectFunc()
+		}
 	}()
+	// Start the goroutine that will write commands
+	go l.writeFromBuffer(stopWriting)
 
-	select {
-	case <-setupComplete:
-		l.connected = true
+	return nil
+}
 
-		// Give the Launch a little bit of time to get ready
-		<-time.After(readyTime)
+// discover scans, connects and discovers characteristics of a Launch.
+func (l *launch) discover(ctx context.Context) error {
+	// Connect to Launch
+	client, err := ble.Connect(ctx, launchAdvFilter)
+	if err != nil {
+		return err
+	}
 
-		// Put the Launch into a mode that it will actually work well
-		err := l.writeMode(modeReadValuesAsBytes)
-		if err != nil {
-			return ErrInit
+	// Discover Service
+	s, err := client.DiscoverServices([]ble.UUID{serviceID})
+	if err != nil {
+		return err
+	}
+	if len(s) != 1 {
+		return ErrDiscover
+	}
+
+	// Discover Launch characteristics
+	cs, err := client.DiscoverCharacteristics(
+		[]ble.UUID{cmdCharID, modeCharID}, s[0])
+	if err != nil {
+		return err
+	}
+	var cmd, mode *ble.Characteristic
+	for _, c := range cs {
+		switch {
+		case c.UUID.Equal(cmdCharID):
+			cmd = c
+		case c.UUID.Equal(modeCharID):
+			mode = c
 		}
+	}
+	if cmd == nil || mode == nil {
+		return ErrDiscover
+	}
 
-		// Start the goroutine that will write commands
-		go l.writeFromBuffer()
+	// Store found device characteristics
+	l.client = client
+	l.cmd = cmd
+	l.mode = mode
 
-		return nil
-	case <-time.After(connectionTimeout):
-		return ErrConnectionTimeout
+	return nil
+}
+
+// launchAdvFilter implements ble.AdvFilter and filters for a Launch.
+func launchAdvFilter(a ble.Advertisement) bool {
+	if strings.ToUpper(a.LocalName()) == strings.ToUpper(name) {
+		return true
+	}
+	return false
+}
+
+// cleanupClient removes all references to a disconnected client.
+func (l *launch) cleanupClient() {
+	if l.client != nil {
+		l.client = nil
+		l.mode = nil
+		l.cmd = nil
 	}
 }
 
 // Disconnect cancels the connection with the Launch.
 func (l *launch) Disconnect() {
-	if l.connected {
-		if d := l.p.Device(); d != nil {
-			d.CancelConnection(l.p)
-		}
+	select {
+	case l.disconnect <- true:
+	default:
 	}
 }
 
@@ -178,11 +231,11 @@ func (l *launch) Disconnect() {
 // the Launch in "read values as bytes", so it interprets values on the command
 // channel as bytes instead of binary coded decimals.
 func (l *launch) writeMode(c byte) error {
-	if !l.connected {
+	if l.client == nil {
 		return ErrDisconnected
 	}
 	if c == modeReadValuesAsBytes {
-		err := l.p.WriteCharacteristic(l.mode, []byte{c}, false)
+		err := l.client.WriteCharacteristic(l.mode, []byte{c}, false)
 		return err
 	}
 	return ErrUnknownMode
@@ -190,17 +243,17 @@ func (l *launch) writeMode(c byte) error {
 
 // writeFromBuffer sends commands to the Launch that are stored in the write
 // buffer. To stop this function send true on the l.stopWriting channel.
-func (l *launch) writeFromBuffer() {
+func (l *launch) writeFromBuffer(stopchan <-chan bool) {
 	for {
 		select {
-		case stop := <-l.stopWriting:
+		case stop := <-stopchan:
 			if stop == true {
 				return
 			}
 		case b := <-l.wbuffer:
 			// Limit amount of writes to avoid disconnects
 			<-l.limiter
-			l.p.WriteCharacteristic(l.cmd, b[:], true)
+			l.client.WriteCharacteristic(l.cmd, b[:], true)
 		}
 	}
 }
@@ -226,97 +279,8 @@ func (l *launch) Move(position, speed int) {
 	l.wbuffer <- data
 }
 
-// discoverCharacteristics finds and stores the Launch characteristics for the
-// given service.
-func (l *launch) discoverCharacteristics(service *gatt.Service) error {
-	cs, err := l.p.DiscoverCharacteristics([]gatt.UUID{
-		modeCharID,
-		cmdCharID,
-	}, service)
-	if err != nil {
-		return err
-	}
-
-	for _, c := range cs {
-		if c.UUID().Equal(cmdCharID) {
-			log.Println("Launch command characteristic found")
-
-			// Store command characteristic
-			l.cmd = c
-			l.modeDiscovered <- true
-		} else if c.UUID().Equal(modeCharID) {
-			log.Println("Launch mode characteristic found")
-
-			// Store mode characteristic
-			l.mode = c
-			l.cmdDiscovered <- true
-		}
-	}
-	return nil
-}
-
-// onConnect stores the connected peripheral in *launch state and discovers and
-// stores characteristics.
-func (l *launch) onConnected(p gatt.Peripheral, err error) {
-	log.Printf("Launch connected")
-	// Store peripheral
-	l.p = p
-
-	services, err := p.DiscoverServices([]gatt.UUID{serviceID})
-	if err != nil {
-		return
-	}
-
-	for _, service := range services {
-		if service.UUID().Equal(serviceID) {
-			log.Println("Launch service found")
-			l.discoverCharacteristics(service)
-		}
-	}
-}
-
 // HandleDisconnect registers a function that is called when the Launch
 // disconnects.
 func (l *launch) HandleDisconnect(f func()) {
 	l.disconnectFunc = f
-}
-
-// onDisconnected will clean up stop scanning and connect if it's a Launch.
-func (l *launch) onDisconnected(p gatt.Peripheral, err error) {
-	log.Println("Launch disconnected")
-
-	select {
-	case l.stopWriting <- true:
-	default:
-	}
-
-	p.Device().Stop()
-	l.connected = false
-
-	if l.disconnectFunc != nil {
-		l.disconnectFunc()
-	}
-}
-
-// onPeripheralDiscovered will stop scanning and connect if it's a Launch.
-func (l *launch) onPeripheralDiscovered(p gatt.Peripheral, a *gatt.Advertisement, rssi int) {
-	if a.LocalName == pName {
-		// Store peripheral
-		l.p = p
-		log.Printf("Launch discovered")
-		p.Device().StopScanning()
-		p.Device().Connect(p)
-	}
-}
-
-// onStateChange will start scanning for the Launch on power on.
-func onStateChanged(d gatt.Device, s gatt.State) {
-	switch s {
-	case gatt.StatePoweredOn:
-		// Scan for Launch
-		d.Scan([]gatt.UUID{serviceID}, false)
-		return
-	default:
-		d.StopScanning()
-	}
 }
