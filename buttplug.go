@@ -2,6 +2,7 @@ package golaunch
 
 import (
 	"context"
+	"crypto/tls"
 	"time"
 
 	"github.com/funjack/golibbuttplug"
@@ -11,9 +12,10 @@ const buttplugLaunchName = "Fleshlight Launch"
 
 // buttplugLauch is a Launch connected via Buttplug.
 type buttplugLaunch struct {
-	ctx  context.Context
-	addr string
-	name string
+	ctx    context.Context
+	addr   string
+	tlscfg *tls.Config
+	name   string
 
 	client *golibbuttplug.Client
 	device *golibbuttplug.Device
@@ -27,10 +29,11 @@ type buttplugLaunch struct {
 
 // NewButtplugLaunch creates a new Launch connected via the Buttplug server
 // running at addr. Identify with the Buttplug server with the given name.
-func NewButtplugLaunch(ctx context.Context, addr, name string) Launch {
+func NewButtplugLaunch(ctx context.Context, addr, name string, tlscfg *tls.Config) Launch {
 	return &buttplugLaunch{
 		ctx:        ctx,
 		addr:       addr,
+		tlscfg:     tlscfg,
 		name:       name,
 		disconnect: make(chan bool),
 		wbuffer:    make(chan [2]int, writeBufferSize),
@@ -48,7 +51,7 @@ func (l *buttplugLaunch) connect() error {
 			return nil
 		}
 	}
-	c, err := golibbuttplug.NewClient(l.ctx, l.addr, l.name)
+	c, err := golibbuttplug.NewClient(l.ctx, l.addr, l.name, l.tlscfg)
 	if err != nil {
 		return err
 	}
