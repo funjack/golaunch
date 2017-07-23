@@ -1,14 +1,14 @@
 package main
 
 import (
-        "context"
-        "fmt"
-        "log"
-        "os"
+	"context"
+	"fmt"
+	"log"
 	"math/rand"
-        "time"
+	"os"
+	"time"
 
-        "github.com/funjack/golaunch"
+	"github.com/funjack/golaunch"
 )
 
 func main() {
@@ -17,23 +17,22 @@ func main() {
 
 	// TODO: keyboard controls for (p)ause, (k)eep doing that, and (o)max speed/range
 
-        launchContext := context.Background()
+	launchContext := context.Background()
 	rand.Seed(time.Now().UTC().UnixNano())
 
-        l := golaunch.NewLaunch()
+	l := golaunch.NewLaunch()
 	log.Printf("Connecting...")
-        l.HandleDisconnect(func() {
-                os.Exit(0)
-        })
-        ctx, cancel := context.WithTimeout(launchContext, time.Second*30)
-        err := l.Connect(ctx)
-        cancel()
-        if err != nil {
-                log.Fatal(err)
-        }
+	l.HandleDisconnect(func() {
+		os.Exit(0)
+	})
+	ctx, cancel := context.WithTimeout(launchContext, time.Second*30)
+	err := l.Connect(ctx)
+	cancel()
+	if err != nil {
+		log.Fatal(err)
+	}
 	log.Printf("Connected to Launch")
 
-        //ticker := time.Tick(time.Duration(*interval) * time.Millisecond)
 	for {
 		var count = rand.Intn(120)
 		var start = rand.Intn(30)
@@ -47,17 +46,17 @@ func main() {
 		}
 		ticker := time.Tick(time.Duration(interval) * time.Millisecond)
 
-
 		/* Stay within official app speed ranges. Reverse engineering efforts
-		   show that going too slow can crash the Launch, and may have other
-                   as yet undiscovered consequences. Change at your own risk. */
+		show that going too slow can crash the Launch and may have other
+		as yet undiscovered consequences that could damage your device.
+		Change at your own risk. */
 		if speed < 20 {
 			speed = 20
 		}
 
 		// if speed and interval are low then enforce longer interval
 		if speed <= 30 && interval < 175 {
-			interval = interval*4
+			interval = interval * 4
 		}
 
 		if end < start {
@@ -83,7 +82,6 @@ func main() {
 			}
 		}
 		posdiff = end - start
-
 
 		fmt.Printf("%d strokes / range %d (%d:%d) / speed %d / interval %dms\n",
 			count, posdiff, start, end, speed, interval)
