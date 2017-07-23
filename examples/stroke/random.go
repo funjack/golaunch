@@ -2,7 +2,6 @@ package main
 
 import (
         "context"
-        "flag"
         "fmt"
         "log"
         "os"
@@ -12,19 +11,14 @@ import (
         "github.com/funjack/golaunch"
 )
 
-var (
-        start    = flag.Int("start", 5, "start position")
-        end      = flag.Int("end", 95, "end position")
-        speed    = flag.Int("speed", 30, "speed")
-        interval = flag.Int("interval", 300, "interval in milliseconds")
-)
-
 func main() {
+
+	// Non-interactive random stroke example.
+
 	// TODO: keyboard controls for (p)ause, (k)eep doing that, and (o)max speed/range
 
-	flag.Parse()
-
         launchContext := context.Background()
+	rand.Seed(time.Now().UTC().UnixNano())
 
         l := golaunch.NewLaunch()
 	log.Printf("Connecting...")
@@ -39,27 +33,24 @@ func main() {
         }
 	log.Printf("Connected to Launch")
 
-        ticker := time.Tick(time.Duration(*interval) * time.Millisecond)
-
-        go func() {
-
-	}()
-
+        //ticker := time.Tick(time.Duration(*interval) * time.Millisecond)
 	for {
-		rand.Seed(time.Now().UTC().UnixNano())
 		var count = rand.Intn(120)
 		var start = rand.Intn(30)
-		var end = rand.Intn(100)
-		var speed = rand.Intn(100)
+		var end = rand.Intn(95)   // stay within official app stroke range
+		var speed = rand.Intn(80) // ditto for maximum speed
 		var interval = rand.Intn(350)
 
 		// you can't feel much in <150ms so increase if necessary
 		if interval < 150 {
 			interval = 150
 		}
-		ticker = time.Tick(time.Duration(interval) * time.Millisecond)
+		ticker := time.Tick(time.Duration(interval) * time.Millisecond)
 
-		// the slow edging crowd should comment this out
+
+		/* Stay within official app speed ranges. Reverse engineering efforts
+		   show that going too slow can crash the Launch, and may have other
+                   as yet undiscovered consequences. Change at your own risk. */
 		if speed < 20 {
 			speed = 20
 		}
@@ -69,8 +60,8 @@ func main() {
 			interval = interval*4
 		}
 
-		for end < start {
-			end++
+		if end < start {
+			end = start
 		}
 
 		// make stroke range >=40
@@ -80,9 +71,15 @@ func main() {
 				end++
 				start--
 			}
-			if start < 1 {
-				// lib already handles this. make display pretty
-				start = 0
+			if start < 5 {
+				/* lib already handles this. make display pretty
+				   and stay within official app range limits. */
+				start = 5
+			}
+			if end > 95 {
+				/* lib already handles this. make display pretty
+				   and stay within official app range limits. */
+				end = 95
 			}
 		}
 		posdiff = end - start
