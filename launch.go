@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/currantlabs/ble"
+	"github.com/go-ble/ble"
 )
 
 var (

@@ -1,8 +1,8 @@
 package golaunch
 
 import (
-	"github.com/currantlabs/ble"
-	"github.com/currantlabs/ble/linux"
+	"github.com/go-ble/ble"
+	"github.com/go-ble/ble/linux"
 )
 
 // NewDefaultDevice is platform specific, see ble documentation for details.
