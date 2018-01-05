@@ -8,7 +8,7 @@ currantlabs(/paypal's) gatt implementation.
 
 ## Setup
 
-See the [gatt docs](https://godoc.org/github.com/currantlabs/gatt#hdr-SETUP)
+See the [gatt docs](https://godoc.org/github.com/go-ble/gatt#hdr-SETUP)
 for the Bluetooth requirements/setup.
 
 ## Examples

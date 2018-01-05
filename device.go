@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/currantlabs/ble"
+	"github.com/go-ble/ble"
 )
 
 // NewDefaultDevice is platform specific, see ble documentation for details.
